@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Robust K-Means</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(0, 0, 0, 0.85); color: white;
+            padding: 25px; border-radius: 12px; border: 1px solid #444;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            pointer-events: auto; /* Allow interacting with inputs */
+            width: 320px;
+        }
+        h3 { margin: 0 0 15px 0; color: #deff9a; font-size: 22px;}
+        .control-group { margin-bottom: 15px; }
+        label { display: flex; justify-content: space-between; align-items: center; font-size: 14px; color: #ccc;}
+        input[type="number"] { 
+            width: 80px; padding: 5px; border-radius: 4px; 
+            border: 1px solid #666; background: #222; color: #deff9a;
+            font-weight: bold; text-align: center;
+        }
+        .legend-item { display: flex; align-items: center; margin-top: 12px; font-size: 14px;}
+        .box { width: 16px; height: 16px; margin-right: 12px; }
+        .red { background-color: #ff4444; }
+        .green { background-color: #44ff44; border-radius: 50%; }
+        .white { background-color: #ffffff; border-radius: 50%; width: 8px; height: 8px; margin-left: 4px; margin-right: 16px;}
+        .instruction { margin-top: 20px; font-size: 13px; color: #888; line-height: 1.4;}
+        button {
+            width: 100%; padding: 10px; margin-top: 15px; border-radius: 6px;
+            background: #444; color: white; border: none; cursor: pointer;
+            font-weight: bold; transition: background 0.2s;
+        }
+        button:hover { background: #666; }
+        #canvas-container { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: -1; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui">
+        <h3>Robust Clustering</h3>
+        
+        <div class="control-group">
+            <label>Number of Clusters (K): 
+                <input type="number" id="k-input" value="3" min="1" max="10">
+            </label>
+        </div>
+        <div class="control-group">
+            <label>Target Tau (Threshold): 
+                <input type="number" id="tau-input" value="1.0" min="0.1" max="10" step="0.1">
+            </label>
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid #444; margin: 20px 0;">
+
+        <div class="legend-item"><div class="white"></div> Data Points</div>
+        <div class="legend-item"><div class="box red"></div> Standard K-Means Centers</div>
+        <div class="legend-item"><div class="box green"></div> Robust Welsch Centers</div>
+        
+        <button onclick="generateInitialData()">Reset Data</button>
+
+        <p class="instruction"><strong>Click anywhere</strong> on the background to add extreme outliers and watch the red centers get pulled!</p>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        // ==========================================
+        // 1. THREE.JS SETUP
+        // ==========================================
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        const aspect = window.innerWidth / window.innerHeight;
+        const camera = new THREE.OrthographicCamera(-10 * aspect, 10 * aspect, 10, -10, 0.1, 100);
+        camera.position.z = 5;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+
+        // Geometries & Materials
+        const pointGeo = new THREE.CircleGeometry(0.12, 16);
+        const pointMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        
+        const stdCenterGeo = new THREE.PlaneGeometry(0.6, 0.6);
+        const stdCenterMat = new THREE.MeshBasicMaterial({ color: 0xff4444 });
+        
+        const robCenterGeo = new THREE.CircleGeometry(0.4, 32);
+        const robCenterMat = new THREE.MeshBasicMaterial({ color: 0x44ff44 });
+
+        // Global State
+        let pointsData = [];
+        let pointMeshes = [];
+        let stdCenterMeshes = [];
+        let robCenterMeshes = [];
+        
+        // DOM Elements
+        const kInput = document.getElementById('k-input');
+        const tauInput = document.getElementById('tau-input');
+
+        // ==========================================
+        // 2. K-MEANS ALGORITHMS (K > 1)
+        // ==========================================
+
+        function getInitialCenters(pts, k) {
+            // Deterministic initialization based on spread so both algorithms start fair
+            let centers = [];
+            for(let i = 0; i < k; i++) {
+                let idx = Math.floor((i * pts.length) / k);
+                centers.push({ x: pts[idx].x, y: pts[idx].y });
+            }
+            return centers;
+        }
+
+        function runStandardKMeans(pts, k) {
+            if (pts.length < k) return [];
+            let centers = JSON.parse(JSON.stringify(getInitialCenters(pts, k))); // Deep copy
+            
+            // Standard Lloyd's Algorithm
+            for (let iter = 0; iter < 20; iter++) {
+                let sums = Array(k).fill(0).map(() => ({ x: 0, y: 0, count: 0 }));
+                
+                // Assignment Step
+                for (let p of pts) {
+                    let minDist = Infinity, bestIdx = 0;
+                    for (let c = 0; c < k; c++) {
+                        let dSq = Math.pow(p.x - centers[c].x, 2) + Math.pow(p.y - centers[c].y, 2);
+                        if (dSq < minDist) { minDist = dSq; bestIdx = c; }
+                    }
+                    sums[bestIdx].x += p.x;
+                    sums[bestIdx].y += p.y;
+                    sums[bestIdx].count++;
+                }
+                
+                // Update Step
+                for (let c = 0; c < k; c++) {
+                    if (sums[c].count > 0) {
+                        centers[c].x = sums[c].x / sums[c].count;
+                        centers[c].y = sums[c].y / sums[c].count;
+                    }
+                }
+            }
+            return centers;
+        }
+
+        function runRobustKMeans(pts, k, targetTau) {
+            if (pts.length < k) return [];
+            let centers = JSON.parse(JSON.stringify(getInitialCenters(pts, k))); // Deep copy
+            
+            let tau = 100.0; // GNC Start
+            const coolingRate = 0.8;
+            
+            // OUTER LOOP: Graduated Non-Convexity (GNC)
+            while (tau > targetTau) {
+                // INNER LOOP: Iteratively Reweighted Least Squares (IRLS)
+                for (let iter = 0; iter < 15; iter++) {
+                    let sums = Array(k).fill(0).map(() => ({ x: 0, y: 0, w: 0 }));
+                    
+                    // Assignment Step (Min Operator)
+                    for (let p of pts) {
+                        let minDist = Infinity, bestIdx = 0;
+                        for (let c = 0; c < k; c++) {
+                            let dSq = Math.pow(p.x - centers[c].x, 2) + Math.pow(p.y - centers[c].y, 2);
+                            if (dSq < minDist) { minDist = dSq; bestIdx = c; }
+                        }
+                        
+                        // Calculate Welsch Weight
+                        let w = Math.exp(-minDist / tau);
+                        
+                        sums[bestIdx].x += p.x * w;
+                        sums[bestIdx].y += p.y * w;
+                        sums[bestIdx].w += w;
+                    }
+                    
+                    // Update Step (Weighted Average)
+                    for (let c = 0; c < k; c++) {
+                        if (sums[c].w > 1e-8) {
+                            centers[c].x = sums[c].x / sums[c].w;
+                            centers[c].y = sums[c].y / sums[c].w;
+                        }
+                    }
+                }
+                tau *= coolingRate;
+            }
+            return centers;
+        }
+
+        // ==========================================
+        // 3. UI SYNC & RENDERING
+        // ==========================================
+
+        function updateMeshes() {
+            let k = parseInt(kInput.value) || 1;
+            let targetTau = parseFloat(tauInput.value) || 0.5;
+
+            // Ensure we have exactly K meshes for Standard Centers
+            while(stdCenterMeshes.length < k) {
+                let m = new THREE.Mesh(stdCenterGeo, stdCenterMat);
+                scene.add(m); stdCenterMeshes.push(m);
+            }
+            // Ensure we have exactly K meshes for Robust Centers
+            while(robCenterMeshes.length < k) {
+                let m = new THREE.Mesh(robCenterGeo, robCenterMat);
+                scene.add(m); robCenterMeshes.push(m);
+            }
+
+            // Hide all meshes initially
+            stdCenterMeshes.forEach(m => m.visible = false);
+            robCenterMeshes.forEach(m => m.visible = false);
+
+            if(pointsData.length >= k) {
+                const stdCenters = runStandardKMeans(pointsData, k);
+                const robCenters = runRobustKMeans(pointsData, k, targetTau);
+
+                for(let i=0; i<k; i++) {
+                    stdCenterMeshes[i].position.set(stdCenters[i].x, stdCenters[i].y, 0.1);
+                    stdCenterMeshes[i].visible = true;
+
+                    robCenterMeshes[i].position.set(robCenters[i].x, robCenters[i].y, 0.2);
+                    robCenterMeshes[i].visible = true;
+                }
+            }
+        }
+
+        function addPoint(x, y) {
+            pointsData.push({x: x, y: y});
+            let mesh = new THREE.Mesh(pointGeo, pointMat);
+            mesh.position.set(x, y, 0);
+            scene.add(mesh);
+            pointMeshes.push(mesh);
+            updateMeshes();
+        }
+
+        function generateInitialData() {
+            // Clear old data
+            pointsData = [];
+            pointMeshes.forEach(m => scene.remove(m));
+            pointMeshes = [];
+
+            // Generate 3 Distinct Clusters (Blobs)
+            const baseCenters = [ {x: -4, y: 3}, {x: 4, y: 2}, {x: 0, y: -4} ];
+            for(let bc of baseCenters) {
+                for(let i = 0; i < 30; i++) {
+                    let r = Math.sqrt(Math.random()) * 2;
+                    let theta = Math.random() * 2 * Math.PI;
+                    addPoint(bc.x + r * Math.cos(theta), bc.y + r * Math.sin(theta));
+                }
+            }
+            updateMeshes();
+        }
+
+        // ==========================================
+        // 4. EVENT LISTENERS
+        // ==========================================
+
+        kInput.addEventListener('input', updateMeshes);
+        tauInput.addEventListener('input', updateMeshes);
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+        container.addEventListener('mousedown', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const target = new THREE.Vector3();
+            raycaster.ray.intersectPlane(plane, target);
+            
+            if (target) {
+                addPoint(target.x, target.y);
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            const newAspect = window.innerWidth / window.innerHeight;
+            camera.left = -10 * newAspect;
+            camera.right = 10 * newAspect;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Initialize and animate
+        generateInitialData();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            // Rotate the standard centers so they are easy to spot behind the robust ones
+            stdCenterMeshes.forEach(m => m.rotation.z += 0.02);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+    </script>
+</body>
+</html>
